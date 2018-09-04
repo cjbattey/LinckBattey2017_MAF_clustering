@@ -5,7 +5,7 @@
 #convert arp format from fastsimcoal2 output to structure format. requires same n inds per pop.
 #md is the average fraction of individuals missing data per site.
 arp2structure <- function(infile,out_directory="str_in/",md=NULL,npops=3,samples_per_pop=10){
-  require(truncnorm)
+  require(truncnorm);require(tools)
   arp <- readLines(infile)
   tmp <- list()
   for(i in grep("SampleData",arp)){
@@ -23,7 +23,7 @@ arp2structure <- function(infile,out_directory="str_in/",md=NULL,npops=3,samples
   seq <- strsplit(seq,"")
   str <- do.call(rbind.data.frame, seq)
   
-  #missing data simulation (assumes the proportion of missing individuals is normally distributed w mean=md & sd=md/2)
+  #missing data simulation (assumes the proportion of missing individuals is normally distributed with mean=md & sd=md/2)
   if(!is.null(md)){
     str <- apply(str,2,function(e) {
       col <- as.numeric(as.character(e))
@@ -41,7 +41,7 @@ arp2structure <- function(infile,out_directory="str_in/",md=NULL,npops=3,samples
   str <- cbind(names,str)
   
   #write to file
-  write.table(str,paste0(out_directory,gsub("_1_","",basename(infile)),".str"),
+  write.table(str,paste0(out_directory,gsub("_1_","",file_path_sans_ext(basename(infile))),".str"),
               sep="\t",row.names = F,col.names = F,quote = F,append=F)
 }
 
@@ -50,16 +50,19 @@ arp2structure <- function(infile,out_directory="str_in/",md=NULL,npops=3,samples
 #filter structure file by minor allele count 
 #accepts structure files with -9 as the NA character
 #two rows per individual, and columns: ID, population, genotypes...
-filter_by_mac <- function(infile,mac=c(2,3,5,8,11,15),pop.info=T){
+#writes new mac-filtered files in the location of the infile appended with mac1/mac2/etc
+filter_by_mac <- function(infile,mac=c(2,3,5,8,11,15),pop.info=T,na.char=-9,max_md=0){
+  library(data.table);library(magrittr);require(pbapply)
   for(mac_selected in mac){
     tmp <- fread(infile,header=F) %>% data.frame()
     names <- tmp[1:(1+pop.info)]
     seq <- tmp[-(1:(1+pop.info))]
     
-    seq <- apply(seq,2,function(e){ #drop non-biallelic loci, make all sites 0/1 (can skip if using simulation w/o missing data)
-      e[e==-9] <- NA
+    seq <- pbapply(seq,2,function(e){ #drop non-biallelic loci, make all sites 0/1 (can skip if using simulation w/o missing data)
+      e[e==na.char] <- NA
+      md <- 1-(length(na.omit(e))/length(e))
       e <- factor(e)
-      if(nlevels(e)==2){
+      if(nlevels(e)==2 & md<=max_md){
         levels(e) <- c(0,1)
         e <- as.numeric(as.character(e))
         e[is.na(e)] <- -9
@@ -69,7 +72,7 @@ filter_by_mac <- function(infile,mac=c(2,3,5,8,11,15),pop.info=T){
     seq <- seq[!sapply(seq,is.null)]
     seq <- data.frame(seq)
 
-    mac_index <- apply(seq,2,function(e) { #build index of minor allele counts
+    mac_index <- pbapply(seq,2,function(e) { #build index of minor allele counts
       e[e==-9] <- NA
       allele_count <- sum(e,na.rm=T)
       if((allele_count/length(na.omit(e)))>0.5){ #if the derived allele is has frequency > 0.5, take 1-frequency
@@ -88,8 +91,18 @@ filter_by_mac <- function(infile,mac=c(2,3,5,8,11,15),pop.info=T){
   }
 }
 
-
-
+#randomly sample n sites out of the alignment and write to file
+sample_sites <- function(infile,n,pop.info=T){
+  tmp <- fread(infile,header=F,data.table=F)
+  names <- tmp[1:(1+pop.info)]
+  seq <- tmp[-(1:(1+pop.info))]
+  seq <- seq[,sample(1:ncol(seq),n)]
+  str <- cbind(names,seq)
+  write.table(str,
+              paste0(tools::file_path_sans_ext(infile),
+                     "_subsample.str"),
+              sep="\t",row.names=F,col.names=F,quote=F,append=F)
+}
 
 #mode function for checking k-means cluster assignments (via https://stackoverflow.com/questions/2547402/is-there-a-built-in-function-for-finding-the-mode)
 Mode <- function(x) {
@@ -112,11 +125,11 @@ cluster_multivar <- function(infile,pop.info=T,pop=NULL,nreps=10){
     str@pop <- factor(pop)
   }
   #run k-means and report the proportion of individuals that would be correctly grouped with their predefined populations
+  kmeans_accuracy <- c()
   for(i in 1:nreps){
     clust <- find.clusters(str,n.pca=length(str@pop),n.clust=3)$grp
-    
     popclust <- c(Mode(clust[str@pop==1]),Mode(clust[str@pop==2]),Mode(clust[str@pop==3])) 
-    if(length(unique(popclust)) < 3){ #if any pop lacks a unique modal cluster assignment, correct popclust
+    if(length(unique(popclust)) < 3){ #if any pop lacks a unique modal cluster assignment, assign it one of the missing clusters
       missingclust <- c(1:3)[!c(1:3) %in% popclust]
       popclustct <- c(sum(as.integer(clust[str@pop==1]==popclust[1])),
                       sum(as.integer(clust[str@pop==2]==popclust[2])),
@@ -137,10 +150,13 @@ cluster_multivar <- function(infile,pop.info=T,pop=NULL,nreps=10){
 
   if(!grepl("mac",infile)){
     mac <- 1
+    run <- infile %>% strsplit("_") %>% unlist() %>% .[4] %>% as.numeric()
+    sim <- infile %>% strsplit("sim") %>% unlist() %>% .[2] %>% strsplit("_") %>% unlist() %>% .[1] %>% as.numeric()
   } else{
-    mac <- infile %>% strsplit("mac") %>% unlist() %>% .[2] %>% strsplit("\\.") %>% unlist() %>% .[1] %>% as.numeric()
+    mac <- infile %>% strsplit("mac") %>% unlist() %>% .[2] %>% strsplit("\\_") %>% unlist() %>% .[1] %>% as.numeric()
+    run <- infile %>% strsplit("_") %>% unlist() %>% .[5] %>% as.numeric()
+    sim <- infile %>% strsplit("sim") %>% unlist() %>% .[2] %>% strsplit("_") %>% unlist() %>% .[1] %>% as.numeric()
   }
-  sim <- infile %>% strsplit("sim") %>% unlist() %>% .[2] %>% strsplit("\\.") %>% unlist() %>% .[1] %>% as.numeric()
   
   out <- data.frame(kmeans=kmeans_accuracy,xval=xval,sim=sim,mac=mac)
   out

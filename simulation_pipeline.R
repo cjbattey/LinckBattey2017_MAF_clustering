@@ -1,6 +1,6 @@
 #3-population simulation and structure inference pipeline
 library(magrittr);library(data.table);library(foreach);library(doMC);
-library(ggplot2);library(plyr);library(ggridges);library(reshape)
+library(ggplot2);library(plyr);library(ggridges);library(reshape);library(gridExtra)
 setwd("~/Dropbox/structure_simulations/")
 registerDoMC(cores=8)
 source("./R_scripts/maf/maf_functions.R")
@@ -15,31 +15,34 @@ system("cd ~/Dropbox/structure_simulations/;
 #convert fastsimcoal (arlequin) to structure format
 files <- list.files("sim",full.names = T)
 files <- files[grep(".arp",files)]
-foreach(i=files) %dopar% arp2structure(infile=i,md=NULL,npops=3,samples_per_pop=10,out_directory="str_in/")
+foreach(i=files) %dopar% arp2structure(infile=i,md=.25,npops=3,samples_per_pop=10,out_directory="str_in/5kloci/")
 
 #Filter sites by minimum minor allele count
-files <- list.files("./str_in",full.names = T)
+files <- list.files("./str_in/5kloci/",full.names = T)
 foreach(i=files) %dopar% filter_by_mac(infile = i,mac=c(2,3,4,5,8,11,15),pop.info=T)
 
+#randomly sample sites to 1000bp for each alignment
+files <- list.files("./str_in",full.names = T)
+foreach(i=files) %dopar% sample_sites(i,1000)
 
 #########################################
 ### run structure in parallel on wopr ###
-
 setwd("/media/burke/bigMac/Dropbox/structure_simulations/")
 library(foreach);library(doMC);library(data.table)
-registerDoMC(cores=30)
+registerDoMC(cores=20)
 
 #set options and file paths here (use full paths)
 reps <- 10 #number of independent analyses per input file
-structure_path <- "/media/burke/bigMac/Dropbox/structure_kernel_src/structure"   #"/Applications/structure/structure"
+structure_path <- "/media/burke/bigMac/Dropbox/tools/structure_kernel_src/structure"   #"/Applications/structure/structure"
 mainparams_path <- "/media/burke/bigMac/Dropbox/structure_simulations/str_params/mainparams.txt"
 extraparams_path <- "/media/burke/bigMac/Dropbox/structure_simulations/str_params/extraparams.txt"
 params_dir <- "/media/burke/bigMac/Dropbox/structure_simulations/str_params/"
-str_in <- "/media/burke/bigMac/Dropbox/structure_simulations/str_in/"
-str_out <- "/media/burke/bigMac/Dropbox/structure_simulations/str_out/"
+str_in <- "/media/burke/bigMac/Dropbox/structure_simulations/str_in/5kloci/"
+str_out <- "/media/burke/bigMac/Dropbox/structure_simulations/str_out/5kloci/"
 
 #scan files in str_in for n loci
 files <- list.files(str_in)
+files <- files[grepl("subsample",files)]
 n_loci <- c()
 for(i in files){
   tmp <- fread(paste0(str_in,i)) #use fread() for significant speed increase if str files don't have extra whitespace columns (otherwise read.table())
@@ -78,27 +81,26 @@ foreach(i=structure_commands) %dopar% system(i)
 ######## multivariate clustering ##########
 
 files <- list.files("str_in",full.names = T)
+files <- files[grepl("subsample",files)]
 clust <- foreach(i=files,.combine = rbind) %dopar% cluster_multivar(i,pop.info=T,nreps=10)
-write.table(clust,"multivariate_clusters.csv",sep=",",row.names = F,col.names = T,quote = F)
+write.table(clust,"sim_mv_clust.csv",sep=",",row.names = F,col.names = T,quote = F)
 
-clust <- read.csv("multivariate_clusters.csv")
-clust$sim <- sapply(clust$file,function(e) {as.character(e) %>% #moved this to the clust_multivar() function. 
-                                              strsplit("sim") %>% 
-                                                unlist() %>% 
-                                                  .[2] %>% 
-                                                    strsplit("\\.") %>% 
-                                                      unlist() %>%
-                                                        .[1] %>%
-                                                          as.numeric()}) #sorry
-clust$mac <- sapply(clust$file,function(e) {if(!grepl("mac",e)){1} else{as.character(e) %>% 
-                                                                          strsplit("mac") %>% 
-                                                                            unlist() %>% 
-                                                                              .[2] %>% 
-                                                                                strsplit("\\.") %>% 
-                                                                                  unlist() %>%
-                                                                                    .[1] %>%
-                                                                                      as.numeric()}})
-melt_clust <- melt(clust[-3],id.vars = c("sim","mac"))
+clust <- read.csv("sim_mv_clust_varlength.csv")
+
+clust$sim <- unlist(lapply(as.character(clust$file),function(e) strsplit(e,"sim") %>% 
+                                              unlist() %>% .[2] %>% strsplit("\\.") %>% 
+                                                unlist() %>% .[1] %>% as.numeric()))
+clust$mac <- unlist(lapply(as.character(clust$file),function(e){
+  if(!grepl("mac",e)){
+    1
+  } else {
+    strsplit(e,"mac") %>% unlist() %>% .[2] %>% strsplit("\\.") %>% unlist() %>% .[1] %>% as.numeric()
+  }
+}))
+clust <- clust[,-3]
+melt_clust <- melt(clust,id.vars = c("sim","mac"))
+
+pdf("fig/sim_pca_summary.pdf",width=4.5,height=3.5)
 ggplot(data=melt_clust,aes(x=value,y=factor(mac)))+
   theme_minimal()+
   theme(strip.background = element_blank())+
@@ -107,28 +109,40 @@ ggplot(data=melt_clust,aes(x=value,y=factor(mac)))+
   xlab("Assignment accuracy")+ylab("Minimum minor allele count")+
   scale_y_discrete(expand = c(0.01,0))+
   geom_density_ridges()
-                                    
+dev.off()                               
                                                   
 
 #########################################
 ###### summarize structure output #######
 
-files <- list.files("./str_out",full.names=T)
+files <- list.files("./str_out/5kloci/",full.names=T) %>% grep("sim",.,value=T)
 q_matrices <- list()
 sum_stats <- list()
 j <- 1
 for(i in files){
   tmp <- readLines(i,warn=F)
+  #version for subsampled data
+  # if(!grepl("mac",i)){
+  #   mac <- 1
+  #   run <- i %>% strsplit("_") %>% unlist() %>% .[4] %>% as.numeric()
+  #   sim <- i %>% strsplit("sim") %>% unlist() %>% .[2] %>% strsplit("_") %>% unlist() %>% .[1] %>% as.numeric()
+  # } else{
+  #   mac <- i %>% strsplit("mac") %>% unlist() %>% .[2] %>% strsplit("\\_") %>% unlist() %>% .[1] %>% as.numeric()
+  #   run <- i %>% strsplit("_") %>% unlist() %>% .[5] %>% as.numeric()
+  #   sim <- i %>% strsplit("sim") %>% unlist() %>% .[2] %>% strsplit("_") %>% unlist() %>% .[1] %>% as.numeric()
+  # }
+  #version for nonsubsampled data (slightly changed file naming bc I'm dumb)
   if(!grepl("mac",i)){
     mac <- 1
     run <- i %>% strsplit("_") %>% unlist() %>% .[3] %>% as.numeric()
+    sim <- i %>% strsplit("sim") %>% unlist() %>% .[2] %>% strsplit(".str") %>% unlist() %>% .[1] %>% as.numeric()
   } else{
-    mac <- i %>% strsplit("mac") %>% unlist() %>% .[2] %>% strsplit("\\.") %>% unlist() %>% .[1] %>% as.numeric()
+    mac <- i %>% strsplit("mac") %>% unlist() %>% .[2] %>% strsplit(".str") %>% unlist() %>% .[1] %>% as.numeric()
     run <- i %>% strsplit("_") %>% unlist() %>% .[4] %>% as.numeric()
+    sim <- i %>% strsplit("sim") %>% unlist() %>% .[2] %>% strsplit("_") %>% unlist() %>% .[1] %>% as.numeric()
   }
-  sim <- i %>% strsplit("sim") %>% unlist() %>% .[2] %>% strsplit("\\.") %>% unlist() %>% .[1] %>% as.numeric()
+  
   alpha <- tmp[grep("Mean value of alpha",tmp)] %>% strsplit(" * ") %>% unlist() %>% .[6] %>% as.numeric()
-  lnL_mean <- tmp[grep("Mean value of ln likelihood",tmp)] %>% strsplit(" * ") %>% unlist() %>% .[7] %>% as.numeric()
   lnL <- tmp[grep("Estimated Ln Prob of Data",tmp)] %>% strsplit(" * ") %>% unlist() %>% .[7] %>% as.numeric()
   
   q <- tmp[(grep("Inferred ancestry of individuals:",tmp)+2):(grep("Inferred ancestry of individuals:",tmp)+31)] %>% 
@@ -136,34 +150,16 @@ for(i in files){
           do.call(rbind.data.frame,.)
   colnames(q) <- c("id","pop","1","2","3")
   q[,3:5] <- q[,3:5] %>% apply(2,function(e) as.numeric(as.character(e)))
-
-  #fraction individuals assigned to unique and mutually exclusive populations based on majority ancestry cluster
-  ind_assignments <- apply(q[,3:5],1,function(z) as.numeric(names(z[which(z==max(z))])[1]))
-  popclust <- c(Mode(ind_assignments[1:10]),Mode(ind_assignments[11:20]),Mode(ind_assignments[21:30]))
-  missingclust <- c(1:3)[!c(1:3) %in% popclust]
-  if(length(unique(popclust))==1){
-    accuracy <- 10/30
-  } else if (length(unique(popclust))==2){
-    pop1 <- sum(ind_assignments[1:10]==popclust[1])
-    pop2 <- sum(ind_assignments[11:20]==popclust[2])
-    pop3 <- sum(ind_assignments[21:30]==missingclust)
-    accuracy <-(pop1+pop2+pop3)/30
-  } else if (length(unique(popclust))==3){
-    pop1 <- sum(ind_assignments[1:10]==popclust[1])
-    pop2 <- sum(ind_assignments[11:20]==popclust[2])
-    pop3 <- sum(ind_assignments[21:30]==popclust[3])
-    accuracy <-(pop1+pop2+pop3)/30
-  }
   
   #swap column names to minimize label switching in structure plots
   clustnames <- c("q1","q2","q3")
   newclustnames <- c(rep(NA,nlevels(factor(q$pop))))
-  for(i in 1:3){
-    d <- subset(q,pop==i)
+  for(k in 1:3){
+    d <- subset(q,pop==k)
     e <- colMeans(d[3:5])
-    f <- as.numeric(names(e[which(e==max(e))]))
+    f <- as.numeric(names(e[which(e==max(e))])[1])
     if(is.na(newclustnames[f])){
-      newclustnames[f] <- clustnames[i]
+      newclustnames[f] <- clustnames[k]
     }
   }
   newclustnames[which(is.na(newclustnames))] <- clustnames[which(clustnames %in% newclustnames==F)]
@@ -191,15 +187,17 @@ q_dist_list <- sapply(mean_q_list,function(e){
 })
 sum_stats$`Population Discrimination` <- q_dist_list/1.414214
 
+sum_stats <- subset(sum_stats,lnL>-45000)
+
 
 sum_stats_wide <- sum_stats
 sum_stats2 <- melt(sum_stats,id.vars = c("sim","mac","run"))
 
 #ridge plot
-ggplot(data=subset(sum_stats2,variable %in% c("log_alpha","accuracy")),
+ridgeplot <- ggplot(data=subset(sum_stats2,variable %in% c("log_alpha","Population Discrimination")),
        aes(y=factor(mac),x=value))+
   theme_minimal()+theme(strip.background = element_blank())+
-  facet_wrap(~variable,scales="free")+
+  facet_wrap(~variable,scales="free_x")+
   scale_y_discrete(expand=c(0.01,0))+
   ylab("Minimum Minor Allele Count")+xlab("")+
   geom_density_ridges(alpha=0.5,rel_min_height=0)
@@ -207,20 +205,39 @@ ggplot(data=subset(sum_stats2,variable %in% c("log_alpha","accuracy")),
 #structure plots (highest lnL per mac for each simulation)
 strplotdata <- do.call(rbind,q_matrices)
 strplotdata$q_dist <- unlist(lapply(q_dist_list,function(e) unlist(rep(e,30))))
-best_runs <- ddply(strplotdata,.(mac,sim),summarize,max_lnL=max(lnL),max_q_dist=max(q_dist),mean_lnL=max(lnL_mean))
-#strplotdata <- subset(strplotdata,q_dist %in% best_runs$max_q_dist)
-strplotdata <- subset(strplotdata,lnL %in% best_runs$max_lnL)
-meltq <- melt(strplotdata[-c(9,10,11)],id.vars=c("id","pop","sim","mac","run"))
-ggplot(data=meltq,aes(x=id,y=value,fill=variable))+
-  facet_grid(mac~sim)+
-  theme_minimal()+theme(axis.text.y=element_blank(),
-                        axis.ticks=element_blank(),
-                        strip.background = element_blank(),
-                        axis.text.x=element_blank(),
-                        rect = element_blank())+
-  ylab("mac")+xlab("")+
-  scale_fill_manual(values = grey.colors(3)[c(2,1,3)])+
-  geom_bar(stat="identity",width=1)
+best_runs <- ddply(strplotdata,.(mac),function(e){
+  # z <- e$run[which(max(e$lnL_mean)==e$lnL_mean)][1]
+  # x <- e$sim[which(max(e$lnL_mean)==e$lnL_mean)][1]#highest mean likelihood
+  # z <- e$run[which(max(e$lnL)==e$lnL)][1]
+  # x <- e$sim[which(max(e$lnL)==e$lnL)][1]#highest ln prob of data
+  z <- e$run[which(max(e$q_dist)==e$q_dist)][1]      #highest average distance bw populations
+  x <- e$sim[which(max(e$q_dist)==e$q_dist)][1]
+  subset(e,e$run==z & sim==x)
+})
+meltq <- melt(best_runs[-c(9,10,11)],id.vars=c("id","pop","sim","mac","run"))
+#meltq <- melt(strplotdata[-c(9,10,11)],id.vars=c("id","pop","sim","mac","run"))
+meltq$mac <- factor(meltq$mac, levels=rev(levels(factor(meltq$mac))))
+strplot <- ggplot(data=meltq,aes(x=id,y=value,fill=variable))+
+              facet_grid(mac~.)+
+              ggtitle("  ")+
+              theme_minimal()+theme(axis.text.y=element_blank(),
+                                    axis.ticks=element_blank(),
+                                    strip.background = element_blank(),
+                                    axis.text.x=element_blank(),
+                                    strip.text.y=element_blank(),
+                                    rect = element_blank())+
+              ylab("")+xlab("")+
+              scale_fill_manual(values = grey.colors(3)[c(2,1,3)])+
+              geom_bar(stat="identity",width=.9,col="black",lwd=0.25)
+
+pdf("~/Dropbox/structure_simulations/fig/ridge_struct_sim_subsample.pdf",width=6,height=3)
+grid.arrange(ridgeplot,strplot,padding=0,layout_matrix=matrix(c(1,1,1,1,NA,NA,
+                                                      rep(c(1,1,1,1,2,2),100),
+                                                      1,1,1,1,NA,NA),nrow=102,byrow=T))
+dev.off()
+
+
+
 
 #exploratory plots for likelihoods and pop dist
 df <- sum_stats_wide 
