@@ -51,7 +51,7 @@ arp2structure <- function(infile,out_directory="str_in/",md=NULL,npops=3,samples
 #accepts structure files with -9 as the NA character
 #two rows per individual, and columns: ID, population, genotypes...
 #writes new mac-filtered files in the location of the infile appended with mac1/mac2/etc
-filter_by_mac <- function(infile,mac=c(2,3,5,8,11,15),pop.info=T,na.char=-9,max_md=0){
+filter_by_mac <- function(infile,mac=c(2,3,5,8,11,15),pop.info=T,na.char=-9,max_md){
   library(data.table);library(magrittr);require(pbapply)
   for(mac_selected in mac){
     tmp <- fread(infile,header=F) %>% data.frame()
