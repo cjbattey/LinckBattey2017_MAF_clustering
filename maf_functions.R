@@ -110,10 +110,40 @@ Mode <- function(x) {
   ux[which.max(tabulate(match(x, ux)))]
 }
 
+# ratio of mean within-population distance to mean distance across all individuals
+pc_st <- function(pc_matrix,populations){
+  out <- c()
+  for(k in unique(populations)){
+    within_dist <- mean(dist(pc_matrix[populations==k,]))
+    total_dist <- mean(dist(pc_matrix))
+    ratio <- within_dist/total_dist
+    out <- append(out,ratio)
+  }
+  return(1-mean(out))
+}
 
+# ratio if inter-individual to inter-population distance of population centers
+# pc_st <- function(pc_matrix,populations){
+#   pop_centers <- sapply(unique(populations),function(e){
+#       sapply(1:3,function(f) mean(pc_matrix[populations==e,f]))
+#   })
+#   popdist <- mean(dist(pop_centers))
+#   inddist <- mean(dist(pc_matrix))
+#   return(1-inddist/popdist)
+# }
+
+#distance across populations with each axis scaled to 0-1
+# pc_st <- function(pc_matrix,populations){
+#   pop_centers <- sapply(unique(populations),function(e){
+#       sapply(1:3,function(f) mean(pc_matrix[populations==e,f]))
+#   })
+#   popdist <- mean(dist(pop_centers))
+#   inddist <- mean(dist(pc_matrix))
+#   return(popdist/1.414214)
+# }
 
 #run k-means assignments and dapc x-validations on a designated infile (single-threaded)
-cluster_multivar <- function(infile,pop.info=T,pop=NULL,nreps=10){
+cluster_multivar <- function(infile,pop.info=T,pop=NULL,nreps=1,satrapa=F){
   require(adegenet)
   tmp <- read.table(infile)
   nloci <- ncol(tmp)-(1+pop.info)
@@ -125,10 +155,16 @@ cluster_multivar <- function(infile,pop.info=T,pop=NULL,nreps=10){
     str@pop <- factor(pop)
   }
   #run k-means and report the proportion of individuals that would be correctly grouped with their predefined populations
-  kmeans_accuracy <- c()
+  kmeans_accuracy <- c();pcst <- c()
   for(i in 1:nreps){
     clust <- find.clusters(str,n.pca=length(str@pop),n.clust=3)$grp
-    popclust <- c(Mode(clust[str@pop==1]),Mode(clust[str@pop==2]),Mode(clust[str@pop==3])) 
+    str_scaled <- scaleGen(str,NA.method="mean",center=T,scale=F)
+    pc <- prcomp(str_scaled,center=F,scale=F)$x[,1:3] %>% data.frame()
+    pc$clust <- unlist(clust)
+    pcst[i] <- pc_st(pc[,1:3],str@pop)
+    #ggplot(data=pc,aes(x=PC1,y=PC2,col=clust))+geom_point()+geom_point(data=pc)+stat_ellipse()
+    
+    popclust <- c(Mode(clust[str@pop==1]),Mode(clust[str@pop==2]),Mode(clust[str@pop==3]))
     if(length(unique(popclust)) < 3){ #if any pop lacks a unique modal cluster assignment, assign it one of the missing clusters
       missingclust <- c(1:3)[!c(1:3) %in% popclust]
       popclustct <- c(sum(as.integer(clust[str@pop==1]==popclust[1])),
@@ -143,21 +179,73 @@ cluster_multivar <- function(infile,pop.info=T,pop=NULL,nreps=10){
 
   #dapc using original (pre-defined) clusters, using n PC's w/highest success in first 10 reps. 
   str_noMD <- scaleGen(str,NA.method="mean",center=T,scale=F)
-  # xval <- xvalDapc(str_noMD,grp=str@pop,n.da=2,n.pca.max=length(str@pop),training.set=0.5,center=F,scale=F,xval.plot=F,n.rep=10)
-  # xval_npc <- xval$`Number of PCs Achieving Highest Mean Success` %>% as.integer()
   xval <- xvalDapc(str_noMD,grp=str@pop,n.da=2,n.pca=3,center=F,scale=F,xval.plot=F,n.rep=nreps,training.set=0.5)
-  xval <- xval$`Cross-Validation Results`[,2]
+  xval <- xval$`Cross-Validation Results`[,2] %>% mean()
 
-  if(!grepl("mac",infile)){
-    mac <- 1
-    run <- infile %>% strsplit("_") %>% unlist() %>% .[4] %>% as.numeric()
-    sim <- infile %>% strsplit("sim") %>% unlist() %>% .[2] %>% strsplit("_") %>% unlist() %>% .[1] %>% as.numeric()
-  } else{
-    mac <- infile %>% strsplit("mac") %>% unlist() %>% .[2] %>% strsplit("\\_") %>% unlist() %>% .[1] %>% as.numeric()
-    run <- infile %>% strsplit("_") %>% unlist() %>% .[5] %>% as.numeric()
-    sim <- infile %>% strsplit("sim") %>% unlist() %>% .[2] %>% strsplit("_") %>% unlist() %>% .[1] %>% as.numeric()
+  if(!satrapa){
+    if(grepl("subsample",infile)){
+      if(!grepl("mac",infile)){
+        mac <- 1
+        sim <- infile %>% strsplit("sim") %>% unlist() %>% .[2] %>% strsplit("_") %>% unlist() %>% .[1] %>% as.numeric()
+        out <- data.frame(kmeans=kmeans_accuracy,xval=xval,pcst=pcst,sim=sim,mac=mac,run=1:nreps)
+        out
+      } else{
+        mac <- infile %>% strsplit("mac") %>% unlist() %>% .[2] %>% strsplit("\\_") %>% unlist() %>% .[1] %>% as.numeric()
+        sim <- infile %>% strsplit("sim") %>% unlist() %>% .[2] %>% strsplit("_") %>% unlist() %>% .[1] %>% as.numeric()
+        out <- data.frame(kmeans=kmeans_accuracy,xval=xval,pcst=pcst,sim=sim,mac=mac,run=1:nreps)
+        out
+      }
+    } else if(!grepl("subsample",infile)){
+      if(!grepl("mac",infile)){
+        mac <- 1
+        sim <- infile %>% strsplit("sim") %>% unlist() %>% .[2] %>% strsplit("_") %>% unlist() %>% .[1] %>% as.numeric()
+        out <- data.frame(kmeans=kmeans_accuracy,xval=xval,pcst=pcst,sim=sim,mac=mac,run=1:nreps)
+        out
+      } else{
+        mac <- infile %>% strsplit("mac") %>% unlist() %>% .[2] %>% strsplit("\\.") %>% unlist() %>% .[1] %>% as.numeric()
+        sim <- infile %>% strsplit("sim") %>% unlist() %>% .[2] %>% strsplit("_") %>% unlist() %>% .[1] %>% as.numeric()
+        out <- data.frame(kmeans=kmeans_accuracy,xval=xval,pcst=pcst,sim=sim,mac=mac,run=1:nreps)
+        out
+      }
+    }
+   } else if(satrapa){
+    mac <- infile %>% strsplit("mac") %>% unlist() %>% .[2] %>% strsplit("\\.") %>% unlist() %>% .[1] %>% as.numeric()
+    out <- data.frame(kmeans=kmeans_accuracy,xval=xval,pcst=pcst,mac=mac)
+    out
   }
-  
-  out <- data.frame(kmeans=kmeans_accuracy,xval=xval,sim=sim,mac=mac)
-  out
 }
+
+#get pc's for a set of structure infiles
+get_pc_from_structure <- function(infiles,pop.info=T,pop=NULL,satrapa=F){
+  require(adegenet)
+  out <- list()
+  for(i in 1:length(infiles)){
+    tmp <- read.table(infiles[i])
+    nloci <- ncol(tmp)-(1+pop.info)
+    nind <- nrow(tmp)/2
+    if(pop.info==T){
+      str <- read.structure(infiles[i],n.ind=nind,n.loc=nloci,col.lab=1,col.pop=2,row.marknames=0,onerowperind=F,ask=F)
+    } else {
+      str <- read.structure(infiles[i],n.ind=nind,n.loc=nloci,col.lab=1,col.pop=0,row.marknames=0,onerowperind=F,ask=F)
+      str@pop <- factor(pop)
+    }
+    str_scaled <- scaleGen(str,NA.method="mean",center=T,scale=F)
+    pc <- prcomp(str_scaled,center=F,scale=F)$x[,1:3] %>% data.frame()
+    pc$sim <- strsplit(infiles[i],"sim") %>% unlist() %>% strsplit("_|\\.") %>% unlist() %>% .[3] %>% as.numeric()
+    if(satrapa){
+      pc$mac <- strsplit(infiles[i],"mac") %>% unlist() %>% strsplit("_|\\.") %>% unlist() %>% .[4] %>% as.numeric()
+    } else {
+      pc$mac <- strsplit(infiles[i],"mac") %>% unlist() %>% strsplit("_|\\.") %>% unlist() %>% .[3] %>% as.numeric()
+    }
+    pc$clust <- find.clusters(str,n.pca=length(str@pop),n.clust=3)$grp
+    out[[i]] <- pc
+  }
+  return(out)
+}
+
+
+
+
+
+
+

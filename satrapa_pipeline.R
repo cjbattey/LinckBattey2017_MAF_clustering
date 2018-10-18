@@ -6,7 +6,7 @@ registerDoMC(cores=8)
 source("../R_scripts/maf/maf_functions.R")
 
 #read in empirical structure files and filter by maf
-filter_by_mac(infile="str_in/satrapa_unlinked.str",pop.info = F,mac=c(1,2,3,4,5,8,11,15))
+filter_by_mac(infile="str_in/satrapa_unlinked.str",pop.info = F,mac=c(1,2,3,4,5,8,11,15),max_md=0.5)
 
 #run structure (copy to wopr & run in a screen)
 setwd("/media/burke/bigMac/Dropbox/structure_simulations/satrapa/")
@@ -14,7 +14,7 @@ library(foreach);library(doMC);library(data.table);library(magrittr)
 registerDoMC(cores=30)
 
 reps <- 10 #number of independent analyses per input file
-structure_path <- "/media/burke/bigMac/Dropbox/structure_kernel_src/structure"   #"/Applications/structure/structure"
+structure_path <- "/media/burke/bigMac/Dropbox/tools/structure_kernel_src/structure"   #"/Applications/structure/structure"
 mainparams_path <- "/media/burke/bigMac/Dropbox/structure_simulations/satrapa/str_params/mainparams.txt"
 extraparams_path <- "/media/burke/bigMac/Dropbox/structure_simulations/satrapa/str_params/extraparams.txt"
 params_dir <- "/media/burke/bigMac/Dropbox/structure_simulations/satrapa/str_params/"
@@ -24,7 +24,7 @@ str_out <- "/media/burke/bigMac/Dropbox/structure_simulations/satrapa/str_out/"
 files <- list.files(str_in) %>% grep("mac",.,value=T)
 n_loci <- c()
 for(i in files){
-  tmp <- fread(paste0(str_in,i)) #use fread() for significant speed increase if str files don't have extra whitespace columns (otherwise read.table())
+  tmp <- read.table(paste0(str_in,i)) #use fread() for significant speed increase if str files don't have extra whitespace columns (otherwise read.table())
   n_loci <- append(n_loci,ncol(tmp)-1) #-1 if no pop info, -2 if pop info present.
 }
 names(n_loci) <- files
@@ -55,11 +55,52 @@ foreach(i=structure_commands) %dopar% system(i)
 
 #run multivariate clustering
 files <- list.files("str_in",full.names = T) %>% grep("mac",.,value = T)
-clust <- foreach(i=files,.combine = rbind) %dopar% cluster_multivar(i,pop.info=F,nreps=10,
+clust <- foreach(i=files,.combine = rbind) %dopar% cluster_multivar(i,pop.info=F,nreps=5,satrapa=T,
                                                                     pop=c(2,2,2,2,2,2,2,2,2,
                                                                          2,2,2,2,2,2,2,2,3,
                                                                          3,3,3,1,1,1,1,2,2,
                                                                          2,2,2,1,1,1))
+mclust <- melt(clust,id.vars="mac") %>% subset(variable %in% c("pcst","kmeans"))
+
+ridgeplot <- ggplot(data=mclust,aes(x=value,y=factor(mac),height=..density..))+
+  theme_classic()+theme(legend.position = "none",
+                        strip.background = element_blank(),
+                        #strip.text = element_blank(),
+                        axis.text=element_text(size=8),
+                        axis.title=element_text(size=8),
+                        axis.title.y.right=element_text())+
+  xlim(0,1)+
+  xlab("")+ylab("Minimum Minor Allele Count")+
+  facet_wrap(~variable,scales="free")+
+  geom_density_ridges(scale=0.99,stat="density",adjust=.2)
+
+pcs <- get_pc_from_structure(files,pop.info=F,pop=c(2,2,2,2,2,2,2,2,2,
+                                                    2,2,2,2,2,2,2,2,3,
+                                                    3,3,3,1,1,1,1,2,2,
+                                                    2,2,2,1,1,1),satrapa=T)
+pcs <- do.call(rbind.data.frame,pcs)
+pcs$mac[is.na(pcs$mac)] <- 1
+pcs$mac <- factor(pcs$mac,levels=c(15,11,8,5,4,3,2,1))
+pcplots <- ggplot(data=pcs,aes(x=PC1,y=PC2,col=clust))+
+  theme_classic()+
+  theme(legend.position = "none",
+        strip.background = element_blank(),
+        strip.text = element_blank(),
+        axis.text=element_text(size=8),
+        axis.title=element_text(size=8),
+        axis.title.y.right=element_text())+
+  scale_x_continuous(breaks=c(-5,0,5))+scale_y_continuous(breaks=c(-5,5))+
+  scale_color_grey()+
+  facet_grid(mac~.)+
+  geom_point(size=0.5)+stat_ellipse()
+
+pdf("../fig/satrapa_pc.pdf",width=6.5,height=4)
+ggdraw()+
+  draw_plot(ridgeplot,0,0,.75,1)+
+  draw_plot(pcplots,.75,0,.25,.95)
+dev.off()  
+
+
 
 #summarize structure output
 files <- list.files("str_out",full.names=T) %>% grep("mac",.,value=T)
@@ -80,24 +121,6 @@ for(i in files){
   colnames(q) <- c("id","1","2","3")
   q$pop <- c(2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,3,3,3,3,1,1,1,1,2,2,2,2,2,1,1,1)
   q[,2:4] <- q[,2:4] %>% apply(2,function(e) as.numeric(as.character(e)))
-  
-  #fraction individuals assigned to unique and mutually exclusive populations based on majority ancestry cluster
-  ind_assignments <- apply(q[,2:4],1,function(z) as.numeric(names(z[which(z==max(z))])[1]))
-  popclust <- c(Mode(ind_assignments[c(1:17,26:30)]),Mode(ind_assignments[c(18:21,31:33)]),Mode(ind_assignments[22:25]))
-  missingclust <- c(1:3)[!c(1:3) %in% popclust]
-  if(length(unique(popclust))==1){
-    accuracy <- 0
-  } else if (length(unique(popclust))==2){
-    pop1 <- sum(ind_assignments[c(1:17,26:30)]==popclust[1])
-    pop2 <- sum(ind_assignments[c(18:21,31:33)]==popclust[2])
-    pop3 <- sum(ind_assignments[22:25]==missingclust)
-    accuracy <-(pop1+pop2+pop3)/33
-  } else if (length(unique(popclust))==3){
-    pop1 <- sum(ind_assignments[c(1:17,26:30)]==popclust[1])
-    pop2 <- sum(ind_assignments[c(18:21,31:33)]==popclust[2])
-    pop3 <- sum(ind_assignments[22:25]==popclust[3])
-    accuracy <-(pop1+pop2+pop3)/33
-  }
   
   #swap column names to minimize label switching in structure plots
   clustnames <- c("q1","q2","q3")
@@ -139,7 +162,7 @@ sum_stats_wide <- sum_stats
 sum_stats2 <- melt(sum_stats,id.vars = c("mac","run"))
 
 #ridge plot
-ggplot(data=subset(sum_stats2,variable %in% c("alpha","Population Discrimination")),
+ridgeplot <- ggplot(data=subset(sum_stats2,variable %in% c("log_alpha","Population Discrimination")),
        aes(y=factor(mac),x=value))+
   theme_minimal()+theme(strip.background = element_blank())+
   facet_wrap(~variable,scales="free")+
@@ -147,21 +170,28 @@ ggplot(data=subset(sum_stats2,variable %in% c("alpha","Population Discrimination
   ylab("Minimum Minor Allele Count")+xlab("")+
   geom_density_ridges(alpha=0.5,rel_min_height=0)
 
-#structure plots (highest lnL per mac for each simulation)
+#structure plots
 strplotdata <- do.call(rbind,q_matrices)
 strplotdata$q_dist <- unlist(lapply(q_dist_list,function(e) unlist(rep(e,33))))
 best_runs <- ddply(strplotdata,.(mac,sim),summarize,max_lnL=max(lnL),max_q_dist=max(q_dist),mean_lnL=max(lnL_mean))
-#strplotdata <- subset(strplotdata,q_dist %in% best_runs$max_q_dist)
-strplotdata <- subset(strplotdata,lnL %in% best_runs$max_lnL)
+strplotdata <- subset(strplotdata,q_dist %in% best_runs$max_q_dist)
+#strplotdata <- subset(strplotdata,lnL %in% best_runs$max_lnL)
 meltq <- melt(strplotdata[-c(8,9,10)],id.vars=c("id","pop","mac","run"))
-ggplot(data=meltq,aes(x=id,y=value,fill=variable))+
-  facet_grid(mac~.)+
+meltq$mac <- factor(meltq$mac, levels=rev(levels(factor(meltq$mac))))
+strplot <- ggplot(data=meltq,aes(x=id,y=value,fill=variable))+
+  facet_grid(mac~.)+ggtitle("  ")+
   theme_minimal()+theme(axis.text.y=element_blank(),
                         axis.ticks=element_blank(),
                         strip.background = element_blank(),
+                        strip.text=element_blank(),
                         axis.text.x=element_blank(),
                         rect = element_blank())+
-  ylab("mac")+xlab("")+
+  ylab("")+xlab("")+
   scale_fill_manual(values = grey.colors(3)[c(2,1,3)])+
-  geom_bar(stat="identity",width=.9)
+  geom_bar(stat="identity",width=.9,col="black",lwd=0.25)
 
+pdf("../fig/final/revision/satrapa_structure.pdf",width=6.5,height=3)
+gridExtra::grid.arrange(ridgeplot,strplot,padding=0,layout_matrix=matrix(c(1,1,1,1,NA,NA,
+                                                                rep(c(1,1,1,1,2,2),40),
+                                                                1,1,1,1,NA,NA),nrow=42,byrow=T))
+dev.off()
